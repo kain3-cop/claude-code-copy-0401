@@ -250,6 +250,22 @@ Reusable workflows defined in `skills/` and executed through `SkillTool`. Users 
 
 Built-in and third-party plugins are loaded through the `plugins/` subsystem.
 
+## 这个项目的架构精妙之处
+
+如果只看目录，这个项目像是一个“功能很多的 CLI”；但它真正巧妙的地方，在于它把 **“模型调用”**、**“工具执行”**、**“权限控制”**、**“交互界面”** 和 **“外部集成”** 拆成了几层可以独立演进的系统。
+
+- `QueryEngine.ts` 负责和模型进行流式对话、处理 tool-call loop。
+- `Tool.ts` 定义统一的工具抽象。
+- `src/hooks/toolPermission/` 把“这个工具能不能执行”从工具本身里剥离出来。
+
+这样做的好处是：新增一个工具时，开发者只需要关心输入、输出和执行逻辑，而不需要把权限判断、UI 表现、调用入口重复写很多遍。
+
+第二个精妙点是它的 **可扩展性不是靠单一插件机制硬撑出来的，而是多层组合出来的**。命令系统（`src/commands/`）解决“用户怎么触发能力”，工具系统（`src/tools/`）解决“能力怎么执行”，技能系统（`src/skills/`）解决“能力怎么复用”，而 `coordinator/` 和 `AgentTool` 又把单代理能力扩展成多代理协作。这意味着 Claude Code 不是把所有逻辑都塞进一个“大聊天循环”里，而是把不同层次的抽象分别做清楚：命令是入口，工具是原子能力，技能是流程复用，协调器是并行协作。
+
+第三个精妙点是它对 **启动性能和运行时成本** 的处理非常工程化。`main.tsx` 在启动阶段会并行预取 MDM 设置、Keychain 信息和部分初始化数据，减少首屏等待；重依赖模块则通过动态 `import()` 延迟加载，只在需要时才拉进来。再配合 Bun 的 feature flag 做 dead code elimination，这套架构既能支撑一个很重的“全功能工程代理”，又不会把每次启动都变成一次昂贵的全量初始化。
+
+最后，`bridge/`、`services/`、`components/` 和 `state/` 的分层也很有代表性：CLI、IDE 桥接、远端服务、界面渲染各管一层，彼此通过清晰边界连接。这种设计让 Claude Code 可以同时存在于终端、IDE、MCP、团队协作等多个场景中，而核心能力仍然围绕同一套工具与查询引擎复用。从架构角度看，它最值得借鉴的不是“功能多”，而是 **把复杂能力拆成一组低耦合、可组合、可裁剪的基础模块**。
+
 ---
 
 ## Disclaimer
