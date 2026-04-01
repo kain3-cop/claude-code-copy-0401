@@ -184,39 +184,39 @@ Notable flags: `PROACTIVE`, `KAIROS`, `BRIDGE_MODE`, `DAEMON`, `VOICE_MODE`, `AG
 
 ---
 
-## 基于 `src/` 源码的架构分析
+## Source-Based Architecture Analysis (`src/`)
 
-上面的章节偏向仓库概览；如果直接从 `src/` 源码往下看，这个项目真正有意思的地方在于：它并不只是“一个带工具的 CLI”，而是一个分层很清晰的 **agent runtime（代理运行时）**。命令入口、能力注册、权限决策、状态管理、UI 渲染、特性开关都被拆成了相对独立的控制面。
+The sections above summarize the repository at a high level. Looking directly at the `src/` tree, the architecture is more interesting than “a CLI with tools”: it is a layered **agent runtime** with clear separation between command entry points, capability registration, permissioning, state, UI, and feature-gated product shapes.
 
-### 1. 主脉络：`main.tsx` → `commands.ts` / `tools.ts` → `query.ts` / `QueryEngine.ts`
+### 1. The main spine: `main.tsx` → `commands.ts` / `tools.ts` → `query.ts` / `QueryEngine.ts`
 
-- **`src/main.tsx`** 是运行时装配中心。
-  - 它不只是启动 CLI parser。
-  - 文件最前面会先触发 `startMdmRawRead()`、`startKeychainPrefetch()` 这样的副作用，让启动 I/O 和后续模块加载并行发生。
-  - 初始化、配置、认证、遥测、命令、工具、MCP、REPL 渲染、特性开关模块都在这里汇合。
-- **`src/commands.ts`** 是用户意图入口的注册中心。
-  - 所有 slash command 在这里集中组织，并通过条件导入区分不同运行环境。
-- **`src/tools.ts`** 是模型能力注册中心。
-  - 它本质上决定了“模型能调用哪些能力”。
-  - 它把基础工具汇总起来，再结合 feature flag、运行环境和 lazy `require()` 做裁剪与解耦。
-- **`src/query.ts`** 是单轮执行循环。
-  - 它负责流式响应、tool use、上下文压缩、token 预算、继续执行与恢复策略。
-- **`src/QueryEngine.ts`** 是会话级协调器。
-  - 它把 `query()` 包装成一个可复用的多轮会话引擎，管理消息状态、usage、回放、memory 加载，以及 SDK / headless 场景。
+- **`src/main.tsx`** is the runtime composition root.
+  - It does more than start a CLI parser.
+  - At the very top, it fires side effects such as `startMdmRawRead()` and `startKeychainPrefetch()` so startup I/O overlaps with the rest of module evaluation.
+  - Initialization, config, auth, telemetry, commands, tools, MCP, REPL rendering, and feature-gated subsystems all meet here.
+- **`src/commands.ts`** is the user-intent registry.
+  - It centralizes slash commands and uses conditional imports to shape the command surface per environment.
+- **`src/tools.ts`** is the capability registry.
+  - It effectively defines what the model can do.
+  - It gathers the base tools, then filters them through feature flags, runtime checks, and lazy `require()` helpers to avoid unnecessary coupling.
+- **`src/query.ts`** is the single-turn execution loop.
+  - It handles streaming responses, tool use, compaction, token budgeting, continuation, and recovery logic.
+- **`src/QueryEngine.ts`** is the conversation-level coordinator.
+  - It wraps `query()` into a reusable multi-turn engine that manages message state, usage, replay, memory loading, and SDK/headless integration.
 
-换句话说，整个系统把下面几件事刻意拆开了：
+In other words, the codebase deliberately separates:
 
-1. **进程启动与运行时装配**（`main.tsx`）
-2. **用户意图入口**（`commands.ts`）
-3. **模型可用能力**（`tools.ts`）
-4. **单轮执行协议**（`query.ts`）
-5. **多轮会话状态**（`QueryEngine.ts`）
+1. **process boot and runtime assembly** (`main.tsx`)
+2. **user intent entry points** (`commands.ts`)
+3. **model capabilities** (`tools.ts`)
+4. **single-turn execution protocol** (`query.ts`)
+5. **multi-turn conversation state** (`QueryEngine.ts`)
 
-这正是它架构精妙的第一层：**“用户想做什么”、“模型能做什么”、“一次执行如何推进”** 被清楚地区分开了。
+That is one of the most elegant aspects of the design: “what the user asked”, “what the model can do”, and “how a turn executes” remain distinct.
 
-### 2. 执行链路：从输入到工具循环再到 UI
+### 2. Execution flow: from input to tool loop to UI
 
-从源码能看出的主链路大致是：
+The main flow visible in the source is roughly:
 
 ```text
 user input
@@ -230,89 +230,89 @@ user input
   → state/UI updates through src/state/AppState.tsx and Ink components
 ```
 
-这条链路的精妙之处在于：模型循环并没有和 UI 渲染耦死在一起。
+The key architectural win here is that the model loop is not entangled with rendering:
 
-- `query.ts` / `QueryEngine.ts` 关注的是 **消息、状态推进、预算、工具结果**
-- Ink / React 组件关注的是 **展示**
-- permission hook 关注的是 **human-in-the-loop 的治理**
-- tool 模块关注的是 **单个能力的执行逻辑**
+- `query.ts` and `QueryEngine.ts` focus on **messages, transitions, budgets, and tool results**
+- Ink/React components focus on **presentation**
+- permission hooks focus on **human-in-the-loop governance**
+- tool modules focus on **capability-specific logic**
 
-因此它可以继续扩展，而不会把所有复杂度都堆到 CLI 入口里。
+That makes the system extensible without forcing every new feature into the CLI entrypoint.
 
-### 3. 工具体系为什么不只是“一个 registry”
+### 3. Why the tool layer is more than a registry
 
-`src/tools.ts` 乍看只是很长的 import 列表，但它其实暴露了几个很关键的设计：
+At first glance, `src/tools.ts` looks like a long import list. In practice, it reveals several deliberate choices:
 
-- 它是**统一的能力目录**。
-- 它通过 **feature flag + 运行时条件** 缩小实际暴露的工具面。
-- 它通过 **lazy import** 避免循环依赖。
-- 它把“全部可能工具”和“当前可用工具”这两个概念分开了。
+- it is the **single capability catalog**
+- it uses **feature flags and runtime checks** to shrink the active tool surface
+- it uses **lazy imports** to avoid circular dependencies
+- it separates “all possible tools” from “currently enabled tools”
 
-这点很重要。很多 agent 系统里，工具发现、工具开关、工具权限会慢慢散落到各处；而这里是有意识地收拢在同一层里，因此更容易回答：
+That matters. In many agent systems, tool discovery, enablement, and exposure drift apart. Here they are intentionally centralized, which makes it easier to reason about:
 
-- 模型理论上能看到什么
-- 当前运行时实际上能执行什么
-- 当前环境应当暴露什么
+- what the model can theoretically see
+- what the runtime can actually execute
+- what the current environment should expose
 
-这对于一个大型 CLI agent 来说，是非常实用而成熟的架构取舍。
+That is a practical and mature architectural choice for a large CLI agent.
 
-### 4. `query.ts` 的本质是“状态机”，而不只是 API 包装
+### 4. `query.ts` is fundamentally a state machine, not just an API wrapper
 
-`src/query.ts` 是整个仓库里最值得看的文件之一。
+`src/query.ts` is one of the most revealing files in the repository.
 
-它不是“请求模型然后把答案打印出来”这么简单，而是在管理：
+It does not simply call the model and print a response. It manages:
 
-- streaming event
-- tool use / tool result 的拼接与兜底恢复
-- token budget 与 continuation
-- 上下文变长后的 compact
-- stop hook / post-sampling hook
-- 多次迭代之间的 transition 原因
+- streaming events
+- tool-use / tool-result stitching and recovery
+- token budgets and continuation
+- compaction when context grows
+- stop hooks and post-sampling hooks
+- transition reasons between iterations
 
-它的高级之处在于：它把一次 LLM turn 当成了一个 **带状态推进规则的协议**，而不是单次请求。
+Its architectural strength is that it treats an LLM turn as a **stateful protocol**, not a single request.
 
-正因为这样，这个 CLI 才能稳定支持：
+That is what allows the CLI to support:
 
-- 长链路工具调用
-- 自动继续执行
-- 上下文压缩与恢复
-- 结构化中断处理
+- long tool-call chains
+- automatic continuation
+- compaction and recovery paths
+- structured interruption handling
 
-这也是“聊天前端代码”和“代理运行时代码”的真正区别。
+This is the difference between “chat frontend code” and “agent runtime code”.
 
-### 5. 工具执行层最漂亮的一点：并发安全分批
+### 5. Tool execution is optimized around concurrency safety
 
-`src/services/tools/toolOrchestration.ts` 里有一个非常漂亮的设计：先判断工具调用是否可以并发，再按批次执行。
+`src/services/tools/toolOrchestration.ts` contains one of the cleanest ideas in the codebase: tool calls are partitioned into batches based on whether they are safe to run concurrently.
 
-- 只读 / 并发安全工具并行跑
-- 会修改状态的工具串行跑
-- context modifier 会被排队并按确定顺序回放
+- read-only / concurrency-safe tools run in parallel
+- stateful or uncertain tools run serially
+- context modifiers are queued and replayed deterministically
 
-这背后平衡了三件事：
+That balances three competing concerns:
 
-- **速度**：能并行的尽量并行
-- **正确性**：涉及状态变化时保持串行
-- **可预测性**：上下文变更顺序明确
+- **speed** from parallel execution
+- **correctness** from serialized mutation
+- **predictability** from explicit context-update ordering
 
-很多系统不是“一律串行，浪费时间”，就是“过度并发，最后打架”。这里走的是中间但成熟的路线。
+Many systems either run everything serially and waste time, or run too much in parallel and create race conditions. This implementation takes the more mature middle path.
 
-### 6. 权限系统是第一层控制面，而不是工具里的附属逻辑
+### 6. Permissioning is a first-class control plane
 
-`src/hooks/useCanUseTool.tsx` 以及周边 permission 模块说明了另一个很强的点：权限检查不是散落在各个工具内部。
+`src/hooks/useCanUseTool.tsx` and the surrounding permission modules show another strong design choice: permission checks are not buried inside individual tools.
 
-它被提炼成了独立的一层，可以统一处理：
+Instead, permission handling is a dedicated layer that can:
 
-- 配置或策略直接放行
-- 配置或策略直接拒绝
-- 进入交互式确认
-- 接入 classifier / auto mode 这类自动化判定
-- 接入 swarm / coordinator 这样的特殊模式
+- allow immediately from config or policy
+- deny immediately
+- ask the user interactively
+- integrate classifier / auto-mode decisions
+- incorporate special handling for swarm/coordinator modes
 
-这样一来，工具作者不需要重复发明一套 permission 逻辑，而 runtime 提供统一决策管线。这个抽象层次非常对。
+That means tool authors do not need to reinvent permission behavior. The runtime provides a shared decision pipeline, which keeps policy enforcement consistent and extensible.
 
-### 7. Feature flag 不是点缀，而是真正在塑造架构
+### 7. Feature flags actively shape the architecture
 
-源码里大量使用了 Bun 的 feature flag，例如：
+The codebase makes heavy use of Bun feature flags in places such as:
 
 - `src/main.tsx`
 - `src/commands.ts`
@@ -320,33 +320,33 @@ user input
 - `src/query.ts`
 - `src/state/AppState.tsx`
 
-微妙的地方在于，它们不只是普通的 `if` 开关，而经常配合：
+The subtlety is that these are not just ordinary `if` toggles. They are often used together with:
 
-- 条件 `require()`
-- 死代码消除（dead-code elimination）
-- 同一套源码生成不同产品形态
+- conditional `require()` calls
+- dead-code elimination
+- environment-specific product shaping from one source tree
 
-这意味着：一个源码树可以服务多个分发形态，同时又不必让所有环境都承担完整的运行时和导入成本。这是相当“工程化”的设计。
+That allows the same codebase to serve multiple distributions without forcing every environment to pay the full runtime and import cost.
 
-### 8. 状态管理的精妙之处：既用 React，又不让核心逻辑 React 化
+### 8. State management uses React without making the core runtime React-centric
 
-`src/state/AppState.tsx` 不只是一个普通 provider。它通过 `useSyncExternalStore` 暴露中心 store，因此：
+`src/state/AppState.tsx` is not just a basic provider. It exposes a central store through `useSyncExternalStore`, which means:
 
-- 有统一的 app store
-- 组件按 slice 订阅
-- 非 React 代码也能拿到 `getState` / `setState`
-- UI 渲染和核心运行时逻辑保持解耦
+- there is a shared app store
+- components subscribe to slices
+- non-React code can still receive `getState` / `setState`
+- rendering remains decoupled from the core runtime
 
-这是一种非常好的折中：
+This is a strong compromise:
 
-- React / Ink 被用在最擅长的地方：终端 UI
-- agent runtime 本身没有被迫“React 化”
+- React/Ink is used where it shines: terminal UI
+- the agent runtime itself is not forced to become React-driven
 
-这一点对同时支持 REPL、headless、bridge、SDK 等多种执行路径的项目尤其重要。
+That matters in a codebase that supports REPL, headless, bridge, and SDK-style execution paths.
 
-### 9. 这套架构最厉害的地方：在大体量代码里还守住了边界
+### 9. The most impressive trait: deliberate boundaries at scale
 
-真正让人觉得“精妙”的，不是某一个孤立模块，而是整个项目反复坚持边界分离：
+The most ingenious part of the architecture is not one isolated module. It is the repeated discipline of keeping boundaries intact:
 
 - command registration ≠ tool registration
 - tool registration ≠ permission resolution
@@ -354,37 +354,185 @@ user input
 - tool execution ≠ query orchestration
 - query orchestration ≠ rendering
 
-对于一个大型 TypeScript CLI 项目来说，这种边界感是很难得的。它使得仓库可以继续生长出：
+For a large TypeScript CLI application, that kind of boundary discipline is rare. It is what lets the repository grow into:
 
-- bridge / IDE 模式
-- swarm / coordinator 模式
-- MCP 集成
-- plugin / skill 系统
-- 多种 permission model
+- bridge / IDE mode
+- swarm / coordinator mode
+- MCP integrations
+- plugin / skill systems
+- multiple permission models
 
-而不是最后退化成一个什么都往里塞的巨型 main loop。
+without collapsing into one giant main loop.
 
-### 10. 用一句话概括
+### 10. In one sentence
 
-如果直接从源码来理解 Claude Code，它更像是：
+If you read the source directly, Claude Code is best understood as:
 
-> **一个分层的代理运行时：commands 表达用户意图，tools 表达模型能力，query loop 执行一个有状态的 model/tool 协议，而 permissions、state、UI 则作为独立控制面包裹在外层。**
+> **a layered agent runtime where commands express user intent, tools express model capabilities, the query loop executes a stateful model/tool protocol, and permissions, state, and UI remain separate control planes around that loop.**
 
-这就是它架构的精确性，也是它能持续扩展的根本原因。
+That separation of concerns is what gives the architecture both precision and scalability.
+
+### 11. Detailed responsibility split: `main.tsx`, `QueryEngine.ts`, and `query.ts`
+
+If you treat these three files as a group, they map cleanly to three different responsibilities:
+
+| File | Primary responsibility | Why this split is elegant |
+|---|---|---|
+| `src/main.tsx` | Process startup, runtime assembly, initial configuration, acquiring tools / commands / AppState | Separates “how the program starts” from “how a turn executes” |
+| `src/QueryEngine.ts` | Conversation lifecycle, message accumulation, permission-denial tracking, system-prompt assembly, SDK/headless coordination | Pulls multi-turn session state out of the single-turn algorithm |
+| `src/query.ts` | Single-turn state machine, streaming events, tool loop, compaction, budget, recovery logic | Keeps the execution protocol as a relatively pure async generator |
+
+In simpler terms:
+
+- `main.tsx` decides **how the system is assembled**
+- `QueryEngine.ts` decides **how a conversation persists**
+- `query.ts` decides **how one turn advances to completion**
+
+That split is valuable because “what startup needs” and “what a single query needs” are not the same problem. If they were forced together, the main loop would become much harder to reason about.
+
+### 12. How `tools`, `permissions`, and `AppState` are decoupled but coordinated
+
+One of the most sophisticated traits in the source is that these three layers are not hard-wired together.
+
+#### `tools`
+
+`src/Tool.ts` and `src/tools.ts` define and register capabilities. Tools mainly express:
+
+- name
+- input schema
+- description
+- execution logic
+- concurrency safety
+
+In other words, tools are treated as capability modules, not global state containers.
+
+#### `permissions`
+
+`src/hooks/useCanUseTool.tsx` extracts permission checking into a dedicated `CanUseToolFn`.
+It:
+
+- calls `hasPermissionsToUseTool(...)`
+- decides allow / deny / ask
+- enters interactive confirmation or classifier flows when needed
+
+So permissions are not implemented ad hoc inside every tool. They run through one decision pipeline.
+
+#### `AppState`
+
+`src/state/AppStateStore.ts` stores runtime state, and `toolPermissionContext` is one of the key inputs read by the permission layer.
+
+The important part is that `QueryEngine.ts` does not bind itself directly to a concrete React store implementation. It only receives:
+
+- `getAppState: () => AppState`
+- `setAppState: (f) => void`
+
+That creates a clean relationship:
+
+```text
+Tools define capabilities
+The permission layer decides whether they may run
+AppState stores permission and runtime state
+QueryEngine reads and updates state only through callbacks
+```
+
+This keeps the layers coordinated without tangling them together.
+
+### 13. A call / data-flow diagram that is closer to the source
+
+The following diagram is a closer representation of the actual boundaries in the source tree:
+
+```text
+main.tsx
+  ├─ initialize environment / config / auth / telemetry
+  ├─ getTools() / getCommands()
+  ├─ prepare getAppState / setAppState / canUseTool
+  └─ call QueryEngine.submitMessage(...)
+             │
+             ▼
+     QueryEngine.ts
+       ├─ maintain mutableMessages / totalUsage / permissionDenials
+       ├─ fetchSystemPromptParts(...)
+       ├─ wrap wrappedCanUseTool(...)
+       └─ call query(...)
+                │
+                ▼
+            query.ts
+              ├─ queryLoop()
+              ├─ call the Claude API
+              ├─ parse assistant messages / tool_use blocks
+              ├─ runTools(...)
+              ├─ compact / budget / recovery
+              └─ yield Message / StreamEvent
+                       │
+                       ▼
+      services/tools/toolOrchestration.ts
+        ├─ partitionToolCalls(...)
+        ├─ execute read-only tools concurrently
+        └─ execute stateful tools serially
+                       │
+                       ▼
+         hooks/useCanUseTool.tsx
+           ├─ hasPermissionsToUseTool(...)
+           ├─ allow / deny / ask
+           └─ update AppState-backed permission context when needed
+```
+
+The most important point in this diagram is that **`query.ts` can do its work without depending on the UI component tree, while permission and state layers can still intervene at the right boundaries.**
+
+### 14. A few additional details that become more impressive on close reading
+
+#### Detail A: `QueryEngine` extends permission behavior by wrapping, not rewriting
+
+In `src/QueryEngine.ts`, `submitMessage()` wraps the injected `canUseTool` into `wrappedCanUseTool`, adding `permissionDenials` tracking for SDK reporting without re-implementing the permission system itself.
+
+That is elegant because:
+
+- permission decisions still belong to the permission layer
+- the conversation layer only adds conversation-scoped responsibilities such as result tracking
+
+It is a very disciplined extension point.
+
+#### Detail B: `query()` is an async generator, which naturally matches a streaming protocol
+
+`src/query.ts` uses `AsyncGenerator` for `query()` / `queryLoop()`. That is not just a stylistic choice; it is extremely well suited to this runtime:
+
+- it can stream messages/events incrementally upstream
+- it can pause naturally between tool loops, recovery, compaction, and interruption handling
+- it can model “the request” as a true flow instead of a pile of callbacks
+
+That makes it easier for REPL, SDK, and headless modes to share the same execution core.
+
+#### Detail C: `AppState` is treated as a state container, not the center of business logic
+
+`src/state/AppStateStore.ts` holds a lot of state, but the core logic is not pushed into the store itself.
+
+That suggests deliberate restraint:
+
+- the state layer stores facts
+- QueryEngine, the permission layer, and tool orchestration advance the workflow
+
+The boundaries remain understandable even as the state surface grows.
+
+#### Detail D: tool concurrency is not a global switch, but a property-driven batching strategy
+
+`src/services/tools/toolOrchestration.ts` does not simply “allow concurrency” or “disable concurrency”. It first runs `partitionToolCalls(...)`, then decides which blocks can run in parallel and which must run serially.
+
+That reflects a mature runtime mindset:
+**concurrency should serve correctness first, not performance alone.**
 
 ---
 
 ## Key Files in Detail
 
-### `QueryEngine.ts` (~46K lines)
+### `QueryEngine.ts`
 
 The core engine for LLM API calls. Handles streaming responses, tool-call loops, thinking mode, retry logic, and token counting.
 
-### `Tool.ts` (~29K lines)
+### `Tool.ts`
 
 Defines base types and interfaces for all tools — input schemas, permission models, and progress state types.
 
-### `commands.ts` (~25K lines)
+### `commands.ts`
 
 Manages registration and execution of all slash commands. Uses conditional imports to load different command sets per environment.
 
